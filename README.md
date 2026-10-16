@@ -85,7 +85,14 @@ the appliance pushes a reading.
 The control lives in `humidifier.py`, humidity measurements in `sensor.py` and
 status flags in `binary_sensor.py`, alongside the existing Bacon entities.
 Shared protocol helpers live in `bacon.py`. The platforms also add entities when
-appliance identification arrives after setup. Bosch protocol identifiers such as
+the coordinator identifies an appliance after setup. It distinguishes unknown
+appliances, air conditioners and dehumidifiers, and remembers the last identified
+kind per device across restarts. Unknown appliances get no control entity until
+their kind is known; shared sensors remain available. Identification prefers the
+Bosch model, then the cached kind, then positive capabilities. Without a model or
+cache, a temperature target identifies an AC; a humidity target together with
+laundry mode identifies a dehumidifier. A humidity reading alone is insufficient.
+Bosch protocol identifiers such as
 `dry_6000i_v2` are used as supplied. Legacy `-dry-` unique IDs are migrated to
 `-dehumidifier-` during integration setup without changing entity IDs or custom
 names. Entity names follow the configured Home Assistant language.
@@ -94,11 +101,15 @@ Home Assistant uses the `humidifier` domain for both humidifiers and
 dehumidifiers; these devices have `device_class: dehumidifier`. They do not get
 an additional climate entity. Obsolete climate entities from earlier versions
 are removed automatically once the device is identified as a dehumidifier.
+This migration also handles disabled entries and stops listening once the kind
+is known. If late model information corrects an already selected kind, the
+integration saves the correction and reloads once to recreate the right platforms.
 
 The 6000i mapping is based on an anonymised device capture. Automated coverage
 also exercises an 8000i identity using the shared capability schema; a live
 8000i capture and physical verification of commands are still outstanding.
-Run these tests with `pytest tests/test_dehumidifier.py`.
+Run these tests with
+`pytest tests/test_dehumidifier.py tests/test_bacon_discovery.py`.
 
 ### Local network access (K 40 RF)
 

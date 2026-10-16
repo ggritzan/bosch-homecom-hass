@@ -60,6 +60,8 @@ CONF_BACON_REGION: Final = "bacon_region"
 # Last-known friendly names (customTitle) per bacon device id, persisted so a
 # reload with an incomplete first shadow doesn't reset the device name.
 CONF_BACON_TITLES: Final = "bacon_titles"
+# Last identified appliance kind per serial; Bacon discovery only lists IDs.
+CONF_BACON_APPLIANCE_TYPES: Final = "bacon_appliance_types"
 DEFAULT_WB_LABEL: Final = "Wallbox"
 
 BOSCH_SENSOR_DESCRIPTORS = {

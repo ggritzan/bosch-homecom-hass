@@ -24,6 +24,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.bosch_homecom import (
+    _async_migrate_bacon_entities,
     _async_migrate_dehumidifier_ids,
     binary_sensor,
     climate,
@@ -31,7 +32,8 @@ from custom_components.bosch_homecom import (
     sensor,
 )
 from custom_components.bosch_homecom.bacon import (
-    bacon_is_dehumidifier,
+    BaconApplianceType,
+    bacon_appliance_type,
     bacon_sensor_attributes,
 )
 from custom_components.bosch_homecom.binary_sensor import (
@@ -39,7 +41,6 @@ from custom_components.bosch_homecom.binary_sensor import (
     BoschComBaconDehumidifierStatus,
     async_setup_entry as binary_sensor_async_setup_entry,
 )
-from custom_components.bosch_homecom.climate import BoschComBaconRacClimate
 from custom_components.bosch_homecom.coordinator import (
     BoschComModuleCoordinatorBaconRac,
 )
@@ -69,6 +70,7 @@ def make_coordinator(model="6000i", device_id="TEST-DEHUMIDIFIER-001"):
     payload["device"]["deviceId"] = device_id
     coordinator.device_info = {"identifiers": {("bosch_homecom", device_id)}}
     coordinator.data = SimpleNamespace(**payload)
+    coordinator.appliance_type = BaconApplianceType.DEHUMIDIFIER
     coordinator.last_update_success = True
     coordinator.local_first = None
     coordinator.async_request_refresh = AsyncMock()
@@ -90,7 +92,7 @@ def test_payload_mapping_and_modes(model):
     coordinator = make_coordinator(model)
     control = BoschComBaconDehumidifier(coordinator)
     humidity = BoschComBaconHumidity(coordinator, MagicMock())
-    assert bacon_is_dehumidifier(coordinator.data)
+    assert coordinator.appliance_type is BaconApplianceType.DEHUMIDIFIER
     assert control.device_class == HumidifierDeviceClass.DEHUMIDIFIER
     assert control.is_on is True
     assert control.target_humidity == 40
@@ -237,6 +239,7 @@ async def test_discovery_waits_for_device_information_and_adds_only_once(
 ):
     coordinator = make_coordinator()
     saved = deepcopy(coordinator.data)
+    coordinator.appliance_type = BaconApplianceType.UNKNOWN
     coordinator.data.info = None
     coordinator.data.metadata = None
     coordinator.data.reported = {"powerEnabled": True}
@@ -246,6 +249,7 @@ async def test_discovery_waits_for_device_information_and_adds_only_once(
     assert not any(isinstance(entity, entity_class) for entity in added)
     discover = coordinator.async_add_listener.call_args.args[0]
     coordinator.data = saved
+    coordinator.appliance_type = BaconApplianceType.DEHUMIDIFIER
     discover()
     discover()
     assert (
@@ -263,7 +267,7 @@ async def test_real_air_conditioner_gets_no_dehumidifier_entities(
     coordinator.data.info = {"appliance": {"type": "climate_6000i"}}
     coordinator.data.reported = {"powerEnabled": True, "tempSetpoint": 23}
     coordinator.data.metadata = {"shadows": {"state": {"tempSetpoint": {"min": 16}}}}
-    assert not bacon_is_dehumidifier(coordinator.data)
+    coordinator.appliance_type = BaconApplianceType.AIR_CONDITIONER
     added = []
     entry = MagicMock(runtime_data=[coordinator])
     await setup(hass, entry, added.extend)
@@ -282,6 +286,7 @@ async def test_late_discovery_handles_multiple_devices_independently(
     ]
     saved = [deepcopy(coordinator.data) for coordinator in coordinators]
     for coordinator in coordinators:
+        coordinator.appliance_type = BaconApplianceType.UNKNOWN
         coordinator.data.info = None
         coordinator.data.metadata = None
         coordinator.data.reported = {}
@@ -290,6 +295,7 @@ async def test_late_discovery_handles_multiple_devices_independently(
     await setup(hass, entry, added.extend)
     for index, coordinator in enumerate(coordinators):
         coordinator.data = saved[index]
+        coordinator.appliance_type = BaconApplianceType.DEHUMIDIFIER
         coordinator.async_add_listener.call_args.args[0]()
         assert (
             len([entity for entity in added if isinstance(entity, entity_class)])
@@ -351,15 +357,15 @@ def test_humidity_limits_and_modes_follow_each_devices_metadata(model):
 def test_known_air_conditioner_with_humidity_feature_is_not_misidentified():
     coordinator = make_coordinator()
     coordinator.data.info["appliance"]["type"] = "climate_6000i"
-    assert not bacon_is_dehumidifier(coordinator.data)
+    assert bacon_appliance_type(coordinator.data) is BaconApplianceType.AIR_CONDITIONER
 
 
 def test_humidity_capability_identifies_device_before_identity_arrives():
     coordinator = make_coordinator()
     coordinator.data.info = None
-    assert bacon_is_dehumidifier(coordinator.data)
+    assert bacon_appliance_type(coordinator.data) is BaconApplianceType.DEHUMIDIFIER
     coordinator.data.metadata["shadows"]["state"]["tempSetpoint"] = {"min": 16}
-    assert not bacon_is_dehumidifier(coordinator.data)
+    assert bacon_appliance_type(coordinator.data) is BaconApplianceType.AIR_CONDITIONER
 
 
 @pytest.mark.parametrize("model", ["6000i", "8000i"])
@@ -430,7 +436,7 @@ async def test_platform_entities_share_the_device_and_load_translated_names(
 
 @pytest.mark.parametrize("model", ["6000i", "8000i"])
 @pytest.mark.asyncio
-async def test_climate_setup_removes_only_the_obsolete_device_entry(hass, model):
+async def test_migration_removes_only_the_obsolete_climate_entry(hass, model):
     coordinator = make_coordinator(model)
     entry = MockConfigEntry(domain="bosch_homecom")
     entry.add_to_hass(hass)
@@ -460,6 +466,7 @@ async def test_climate_setup_removes_only_the_obsolete_device_entry(hass, model)
         ),
     ]
     added = []
+    _async_migrate_bacon_entities(hass, entry, coordinator)
     await climate.async_setup_entry(hass, entry, added.extend)
     assert added == []
     assert registry.async_get(obsolete.entity_id) is None
@@ -467,7 +474,7 @@ async def test_climate_setup_removes_only_the_obsolete_device_entry(hass, model)
 
 
 @pytest.mark.asyncio
-async def test_climate_cleanup_respects_the_config_entry(hass):
+async def test_climate_migration_respects_the_config_entry(hass):
     coordinator = make_coordinator()
     entry = MockConfigEntry(domain="bosch_homecom")
     other_entry = MockConfigEntry(domain="bosch_homecom")
@@ -481,14 +488,17 @@ async def test_climate_cleanup_respects_the_config_entry(hass):
         f"{coordinator.unique_id}-climate",
         config_entry=other_entry,
     )
-    await climate.async_setup_entry(hass, entry, lambda entities: None)
+    _async_migrate_bacon_entities(hass, entry, coordinator)
     assert registry.async_get(foreign.entity_id) is not None
 
 
 @pytest.mark.parametrize("model", ["6000i", "8000i", "climate_6000i"])
+@pytest.mark.parametrize("finish_setup_first", [False, True])
 @pytest.mark.asyncio
-async def test_late_identity_keeps_only_the_correct_control_entity(hass, model):
-    """An existing climate entity is retired when a late MQTT identity is Dry."""
+async def test_late_identity_creates_only_the_correct_control_entity(
+    hass, model, finish_setup_first
+):
+    """Unknown devices never queue a climate, including during platform setup."""
     coordinator = make_coordinator()
     identified = deepcopy(coordinator.data)
     if model == "climate_6000i":
@@ -500,6 +510,7 @@ async def test_late_identity_keeps_only_the_correct_control_entity(hass, model):
     coordinator.data.info = None
     coordinator.data.metadata = None
     coordinator.data.reported = {"powerEnabled": True}
+    coordinator.appliance_type = BaconApplianceType.UNKNOWN
     listeners = set()
 
     def subscribe(listener, *args, **kwargs):
@@ -519,12 +530,17 @@ async def test_late_identity_keeps_only_the_correct_control_entity(hass, model):
             )
             platforms.append(platform)
             assert await platform.async_setup_entry(entry)
-        await hass.async_block_till_done()
-        old_climate_id = registry.async_get_entity_id(
-            "climate", "bosch_homecom", f"{coordinator.unique_id}-climate"
+        if finish_setup_first:
+            await hass.async_block_till_done()
+        assert not entity_registry.async_entries_for_config_entry(
+            registry, entry.entry_id
         )
-        assert old_climate_id is not None
         coordinator.data = identified
+        coordinator.appliance_type = (
+            BaconApplianceType.AIR_CONDITIONER
+            if model == "climate_6000i"
+            else BaconApplianceType.DEHUMIDIFIER
+        )
         # Repeated pushes must not duplicate native controls or remove ACs.
         for _ in range(2):
             for listener in tuple(listeners):
@@ -535,10 +551,12 @@ async def test_late_identity_keeps_only_the_correct_control_entity(hass, model):
         )
         if model == "climate_6000i":
             assert [entity.domain for entity in registered] == ["climate"]
-            assert hass.states.get(old_climate_id).attributes["temperature"] == 23
+            assert (
+                hass.states.get(registered[0].entity_id).attributes["temperature"] == 23
+            )
         else:
             assert [entity.domain for entity in registered] == ["humidifier"]
-            assert hass.states.get(old_climate_id) is None
+            assert not hass.states.async_entity_ids("climate")
             assert (
                 hass.states.get(registered[0].entity_id).attributes["device_class"]
                 == "dehumidifier"
@@ -555,6 +573,7 @@ async def test_late_identity_removes_a_disabled_climate_entry(hass):
     coordinator.data.info = None
     coordinator.data.metadata = None
     coordinator.data.reported = {"powerEnabled": True}
+    coordinator.appliance_type = BaconApplianceType.UNKNOWN
     entry = MockConfigEntry(domain="bosch_homecom")
     entry.add_to_hass(hass)
     entry.runtime_data = [coordinator]
@@ -566,6 +585,9 @@ async def test_late_identity_removes_a_disabled_climate_entry(hass):
         config_entry=entry,
         disabled_by=entity_registry.RegistryEntryDisabler.USER,
     )
+    _async_migrate_bacon_entities(hass, entry, coordinator)
+    migrate = coordinator.async_add_listener.call_args.args[0]
+    unsubscribe = coordinator.async_add_listener.return_value
     platform = MockEntityPlatform(
         hass, domain="climate", platform_name="bosch_homecom", platform=climate
     )
@@ -573,33 +595,11 @@ async def test_late_identity_removes_a_disabled_climate_entry(hass):
         assert await platform.async_setup_entry(entry)
         assert hass.states.get(disabled.entity_id) is None
         coordinator.data = identified
-        coordinator.async_add_listener.call_args.args[0]()
+        coordinator.appliance_type = BaconApplianceType.DEHUMIDIFIER
+        migrate()
         await hass.async_block_till_done()
         assert registry.async_get(disabled.entity_id) is None
-    finally:
-        await platform.async_reset()
-
-
-@pytest.mark.parametrize("model", ["6000i", "8000i"])
-@pytest.mark.asyncio
-async def test_identity_arriving_before_queued_climate_is_added(hass, model):
-    coordinator = make_coordinator(model)
-    identified = deepcopy(coordinator.data)
-    coordinator.data.info = None
-    coordinator.data.metadata = None
-    coordinator.data.reported = {"powerEnabled": True}
-    entity = BoschComBaconRacClimate(coordinator)
-    coordinator.data = identified
-    entry = MockConfigEntry(domain="bosch_homecom")
-    entry.add_to_hass(hass)
-    platform = MockEntityPlatform(hass, domain="climate", platform_name="bosch_homecom")
-    platform.config_entry = entry
-    try:
-        await platform.async_add_entities([entity])
-        await hass.async_block_till_done()
-        registry = entity_registry.async_get(hass)
-        assert registry.async_get(entity.entity_id) is None
-        assert hass.states.get(entity.entity_id) is None
+        unsubscribe.assert_called_once()
     finally:
         await platform.async_reset()
 

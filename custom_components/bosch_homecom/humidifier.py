@@ -20,7 +20,7 @@ from homecom_alt import ApiError
 
 from .bacon import (
     BACON_DEHUMIDIFIER_MODES,
-    bacon_is_dehumidifier,
+    BaconApplianceType,
     bacon_meta_state,
     bacon_sensor_attributes,
 )
@@ -46,8 +46,9 @@ async def async_setup_entry(
     def _async_add_dehumidifiers() -> None:
         entities = []
         for coordinator in coordinators:
-            if coordinator.unique_id in added_devices or not bacon_is_dehumidifier(
-                coordinator.data
+            if (
+                coordinator.unique_id in added_devices
+                or coordinator.appliance_type is not BaconApplianceType.DEHUMIDIFIER
             ):
                 continue
             entities.append(BoschComBaconDehumidifier(coordinator=coordinator))
@@ -55,7 +56,7 @@ async def async_setup_entry(
         if entities:
             async_add_entities(entities)
 
-    # Appliance identification may arrive after setup on the push-only topics.
+    # The coordinator may resolve the appliance kind after the first shadow.
     for coordinator in coordinators:
         config_entry.async_on_unload(
             coordinator.async_add_listener(_async_add_dehumidifiers)

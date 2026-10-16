@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import timedelta
+import logging
 from typing import Any
 
 from aiohttp.client_exceptions import ClientConnectorError, ClientError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICES, CONF_TOKEN, Platform
 from homeassistant.core import (
+    CALLBACK_TYPE,
     HomeAssistant,
     ServiceCall,
     ServiceResponse,
@@ -18,9 +19,11 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homecom_alt import (
@@ -45,6 +48,7 @@ from homecom_alt import (
 )
 from homecom_alt.const import BACON_DEFAULT_REGION
 
+from .bacon import BaconApplianceType
 from .const import (
     CAPTURE_RAW_DEFAULT_SECONDS,
     CAPTURE_RAW_MAX_SECONDS,
@@ -364,6 +368,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.runtime_data = coordinators
     _async_migrate_dehumidifier_ids(hass, entry)
+    for coordinator in coordinators:
+        if coordinator.device["deviceType"] == "bacon_rac":
+            _async_migrate_bacon_entities(hass, entry, coordinator)
     # Forward the setup to the sensor platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -390,6 +397,73 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 @callback
+def _async_migrate_bacon_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    coordinator: BoschComModuleCoordinatorBaconRac,
+) -> None:
+    """Remove obsolete entities once this device's appliance kind is known.
+
+    Run before platform setup, including for disabled entities. Only devices
+    with existing type-specific entities need an identification listener.
+    """
+    registry = er.async_get(hass)
+
+    def _registered_entities() -> list[er.RegistryEntry]:
+        """Find only this entry's type-specific entities for the exact device."""
+        return [
+            entity
+            for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
+            if entity.platform == DOMAIN
+            and (
+                (
+                    entity.domain == "climate"
+                    and entity.unique_id == f"{coordinator.unique_id}-climate"
+                )
+                or (
+                    entity.domain in {"humidifier", "sensor", "binary_sensor"}
+                    and entity.unique_id.startswith(
+                        f"{coordinator.unique_id}-dehumidifier-"
+                    )
+                )
+            )
+        ]
+
+    if not _registered_entities():
+        return
+    unsubscribe: CALLBACK_TYPE | None = None
+
+    @callback
+    def _async_unsubscribe() -> None:
+        """Release the listener once, on identification or entry unload."""
+        nonlocal unsubscribe
+        if unsubscribe is not None:
+            unsubscribe()
+            unsubscribe = None
+
+    @callback
+    def _async_migrate() -> None:
+        """Apply the migration once, including after a delayed identification."""
+        if coordinator.appliance_type is BaconApplianceType.UNKNOWN:
+            return
+        _async_unsubscribe()
+        expected_domains = (
+            {"climate"}
+            if coordinator.appliance_type is BaconApplianceType.AIR_CONDITIONER
+            else {"humidifier", "sensor", "binary_sensor"}
+        )
+        for entity in _registered_entities():
+            if entity.domain not in expected_domains:
+                registry.async_remove(entity.entity_id)
+
+    if coordinator.appliance_type is BaconApplianceType.UNKNOWN:
+        unsubscribe = coordinator.async_add_listener(_async_migrate)
+        entry.async_on_unload(_async_unsubscribe)
+    else:
+        _async_migrate()
+
+
+@callback
 def _async_migrate_dehumidifier_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Keep entity IDs and custom names when upgrading the earlier Dry patch."""
     registry = er.async_get(hass)
@@ -405,7 +479,9 @@ def _async_migrate_dehumidifier_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             if not registered.unique_id.startswith(old_prefix):
                 continue
             new_unique_id = new_prefix + registered.unique_id[len(old_prefix) :]
-            if not registry.async_get_entity_id(registered.domain, DOMAIN, new_unique_id):
+            if not registry.async_get_entity_id(
+                registered.domain, DOMAIN, new_unique_id
+            ):
                 registry.async_update_entity(
                     registered.entity_id, new_unique_id=new_unique_id
                 )

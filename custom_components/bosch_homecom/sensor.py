@@ -31,7 +31,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .bacon import bacon_is_dehumidifier, bacon_sensor_attributes
+from .bacon import BaconApplianceType, bacon_sensor_attributes
 from .const import BOSCH_SENSOR_DESCRIPTORS, DOMAIN, WDDW2_NOTIFICATION_CODES
 from .coordinator import (
     BoschComModuleCoordinatorBaconRac,
@@ -65,8 +65,9 @@ async def async_setup_entry(
         new_entities = []
         for coordinator in coordinators:
             if (
-                coordinator.unique_id in added_dehumidifiers
-                or not bacon_is_dehumidifier(coordinator.data)
+                coordinator.data.device.get("deviceType") != "bacon_rac"
+                or coordinator.unique_id in added_dehumidifiers
+                or coordinator.appliance_type is not BaconApplianceType.DEHUMIDIFIER
             ):
                 continue
             new_entities.append(

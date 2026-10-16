@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from enum import StrEnum
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from homecom_alt import BHCDeviceBaconRac
 
 # A topics/meta payload is {"shadows": {"state": …, "schedule": …}, …}; the state
 # block is the per-field capability map (type/enum/min/max/step and the ``ro``
@@ -29,6 +33,14 @@ BACON_FEATURE_KEYS: dict[str, str] = {
 BACON_DEHUMIDIFIER_MODES = ["auto", "night", "laundry"]
 # Bosch protocol identifiers, including firmware suffixes such as _v2.
 BACON_DEHUMIDIFIER_APPLIANCE_TYPES = ("dry_6000i", "dry_8000i")
+
+
+class BaconApplianceType(StrEnum):
+    """Appliance kinds sharing the Bacon transport and its discovery label."""
+
+    UNKNOWN = "unknown"
+    AIR_CONDITIONER = "air_conditioner"
+    DEHUMIDIFIER = "dehumidifier"
 
 
 def bacon_meta_state(metadata: dict | None) -> dict:
@@ -63,25 +75,48 @@ def bacon_feature_fields(reported: dict) -> list[str]:
     ]
 
 
-def bacon_is_dehumidifier(data: Any) -> bool:
-    """Identify a 6000i/8000i from its appliance type or humidity capability."""
-    if data is None or data.device.get("deviceType") != "bacon_rac":
-        return False
-    info = getattr(data, "info", None) or {}
-    appliance_type = (info.get("appliance") or {}).get("type", "")
+def bacon_appliance_type(
+    data: BHCDeviceBaconRac,
+    *,
+    known_type: BaconApplianceType = BaconApplianceType.UNKNOWN,
+) -> BaconApplianceType:
+    """Prefer appliance identity, then a known type, then positive capabilities.
+
+    Info and metadata are push-only and may be missing after a restart. Keep a
+    previously identified type in that case. A humidity reading or an absent
+    temperature target does not by itself identify a dehumidifier: require its
+    humidity target and laundry mode before using the capability fallback.
+    """
+    info = data.info if isinstance(data.info, dict) else {}
+    appliance = info.get("appliance")
+    appliance_type = appliance.get("type") if isinstance(appliance, dict) else None
     if isinstance(appliance_type, str) and appliance_type:
-        return any(
+        if any(
             appliance_type == model or appliance_type.startswith(f"{model}_")
             for model in BACON_DEHUMIDIFIER_APPLIANCE_TYPES
-        )
-    # The shadow is fetched at startup; info/meta may arrive later over MQTT.
-    reported = getattr(data, "reported", None) or {}
-    metadata = bacon_meta_state(getattr(data, "metadata", None))
-    return (
-        ("humiditySetpoint" in reported or "humiditySetpoint" in metadata)
-        and "tempSetpoint" not in reported
-        and "tempSetpoint" not in metadata
+        ):
+            return BaconApplianceType.DEHUMIDIFIER
+        if appliance_type.startswith("climate_"):
+            return BaconApplianceType.AIR_CONDITIONER
+        # An explicit, unsupported model must not become an AC by default.
+        return BaconApplianceType.UNKNOWN
+
+    if known_type is not BaconApplianceType.UNKNOWN:
+        return known_type
+    reported = data.reported or {}
+    metadata = bacon_meta_state(data.metadata)
+    if "tempSetpoint" in reported or "tempSetpoint" in metadata:
+        return BaconApplianceType.AIR_CONDITIONER
+    mode_metadata = metadata.get("opMode", {})
+    modes = mode_metadata.get("enum") if isinstance(mode_metadata, dict) else None
+    supports_laundry = reported.get("opMode") == "laundry" or (
+        isinstance(modes, list) and "laundry" in modes
     )
+    if supports_laundry and (
+        "humiditySetpoint" in reported or "humiditySetpoint" in metadata
+    ):
+        return BaconApplianceType.DEHUMIDIFIER
+    return BaconApplianceType.UNKNOWN
 
 
 def bacon_sensor_attributes(sensor: dict | None) -> dict[str, str]:

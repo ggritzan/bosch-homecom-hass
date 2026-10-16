@@ -49,7 +49,9 @@ from homecom_alt import (
 )
 from tenacity import RetryError
 
+from .bacon import BaconApplianceType, bacon_appliance_type
 from .const import (
+    CONF_BACON_APPLIANCE_TYPES,
     CONF_BACON_TITLES,
     CONF_REFRESH,
     DEFAULT_UPDATE_INTERVAL,
@@ -806,7 +808,7 @@ BACON_RECONNECT_MIN_DELAY = timedelta(minutes=1)
 
 
 class BoschComModuleCoordinatorBaconRac(DataUpdateCoordinator[BHCDeviceBaconRac]):
-    """Coordinator for a Matter/Bacon-commissioned RAC device (MQTT shadow).
+    """Coordinator for an appliance using the shared Bacon MQTT transport.
 
     Unlike the pointt (REST) coordinators these devices push their state over an
     MQTT device-shadow. A single :class:`BaconMqttClient` is shared across all
@@ -852,6 +854,14 @@ class BoschComModuleCoordinatorBaconRac(DataUpdateCoordinator[BHCDeviceBaconRac]
         self.firmware = firmware["value"]
         self._unsub_reconnect: CALLBACK_TYPE | None = None
         entry.async_on_unload(self._cancel_scheduled_reconnect)
+        self._appliance_reload_pending = False
+        persisted_type = (entry.data.get(CONF_BACON_APPLIANCE_TYPES) or {}).get(
+            self.unique_id
+        )
+        try:
+            self._appliance_type = BaconApplianceType(persisted_type)
+        except (TypeError, ValueError):
+            self._appliance_type = BaconApplianceType.UNKNOWN
 
         # Seed the name from the last-known title persisted on the entry so a
         # reload whose first shadow lacks customTitle keeps the friendly name
@@ -867,6 +877,11 @@ class BoschComModuleCoordinatorBaconRac(DataUpdateCoordinator[BHCDeviceBaconRac]
         )
 
         client.register_listener(self.unique_id, self._handle_push)
+
+    @property
+    def appliance_type(self) -> BaconApplianceType:
+        """Return the appliance kind used to select this device's platforms."""
+        return self._appliance_type
 
     @callback
     def _handle_push(self, state: dict) -> None:
@@ -896,7 +911,7 @@ class BoschComModuleCoordinatorBaconRac(DataUpdateCoordinator[BHCDeviceBaconRac]
             if clean:
                 self.device_info["name"] = clean
                 self._persist_title(clean)
-        return BHCDeviceBaconRac(
+        data = BHCDeviceBaconRac(
             device=self.device,
             firmware=self.firmware,
             reported=reported,
@@ -908,6 +923,35 @@ class BoschComModuleCoordinatorBaconRac(DataUpdateCoordinator[BHCDeviceBaconRac]
             metadata=self.bhc.metadata,
             info=self.bhc.info,
         )
+        self._update_appliance_type(data)
+        return data
+
+    def _update_appliance_type(self, data: BHCDeviceBaconRac) -> None:
+        """Resolve once for the platforms and persist changes for future loads."""
+        appliance_type = bacon_appliance_type(data, known_type=self._appliance_type)
+        if appliance_type in (BaconApplianceType.UNKNOWN, self._appliance_type):
+            return
+        types = dict(self.entry.data.get(CONF_BACON_APPLIANCE_TYPES) or {})
+        if types.get(self.unique_id) != appliance_type.value:
+            types[self.unique_id] = appliance_type.value
+            self.hass.config_entries.async_update_entry(
+                self.entry, data={**self.entry.data, CONF_BACON_APPLIANCE_TYPES: types}
+            )
+
+        if (
+            self.data is not None
+            and self._appliance_type is not BaconApplianceType.UNKNOWN
+        ):
+            # Late identity can correct a cached or capability-derived kind.
+            # Keep the active platforms consistent until HA reloads them using
+            # the corrected cache; never create a second control alongside one
+            # already queued or registered. The setup lock also covers a change
+            # arriving while entry setup is still in progress.
+            if not self._appliance_reload_pending:
+                self._appliance_reload_pending = True
+                self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
+            return
+        self._appliance_type = appliance_type
 
     def _persist_title(self, title: str) -> None:
         """Persist the friendly name on the entry so it survives a reload."""
