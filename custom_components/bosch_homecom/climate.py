@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Literal
 
 from homeassistant import config_entries
@@ -24,10 +25,12 @@ from homeassistant.components.climate import (
 )
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .bacon import bacon_meta_state
+from .bacon import bacon_is_dehumidifier, bacon_meta_state
+from .const import DOMAIN
 from .coordinator import (
     BoschComModuleCoordinatorBaconRac,
     BoschComModuleCoordinatorIcom,
@@ -46,6 +49,23 @@ def _parse_temp_unit(unit_str: str | None) -> str:
     return UnitOfTemperature.CELSIUS
 
 
+@callback
+def _async_remove_dehumidifier_climate(
+    hass: HomeAssistant,
+    config_entry_id: str,
+    coordinator: BoschComModuleCoordinatorBaconRac,
+) -> None:
+    """Remove this entry's obsolete climate entity for an identified dehumidifier."""
+    if not bacon_is_dehumidifier(coordinator.data):
+        return
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "climate", DOMAIN, f"{coordinator.unique_id}-climate"
+    )
+    if entity_id and registry.async_get(entity_id).config_entry_id == config_entry_id:
+        registry.async_remove(entity_id)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: config_entries.ConfigEntry,
@@ -61,7 +81,18 @@ async def async_setup_entry(
         if device_type == "rac":
             entities.append(BoschComRacClimate(coordinator=coordinator, field="clima"))
         elif device_type == "bacon_rac":
-            entities.append(BoschComBaconRacClimate(coordinator=coordinator))
+            # The platform listener also cleans disabled entities when identity
+            # arrives late; those entities never subscribe to the coordinator.
+            cleanup = partial(
+                _async_remove_dehumidifier_climate,
+                hass,
+                config_entry.entry_id,
+                coordinator,
+            )
+            config_entry.async_on_unload(coordinator.async_add_listener(cleanup))
+            cleanup()
+            if not bacon_is_dehumidifier(coordinator.data):
+                entities.append(BoschComBaconRacClimate(coordinator=coordinator))
         elif device_type in ("k40", "k30", "icom"):
             for ref in coordinator.data.heating_circuits or []:
                 hc_id = ref["id"].split("/")[-1]
@@ -837,6 +868,18 @@ class BoschComBaconRacClimate(
         if title:
             coordinator.device_info["name"] = title
         self._attr_device_info = coordinator.device_info
+
+    async def async_added_to_hass(self) -> None:
+        """Recheck the subtype if identity arrived while the entity was queued."""
+        await super().async_added_to_hass()
+        if self.platform.config_entry and bacon_is_dehumidifier(self.coordinator.data):
+            # Let HA finish adding the entity before registry removal runs.
+            self.hass.loop.call_soon(
+                _async_remove_dehumidifier_climate,
+                self.hass,
+                self.platform.config_entry.entry_id,
+                self.coordinator,
+            )
 
     @property
     def _reported(self) -> dict:

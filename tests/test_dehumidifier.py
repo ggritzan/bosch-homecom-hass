@@ -26,6 +26,7 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.bosch_homecom import (
     _async_migrate_dehumidifier_ids,
     binary_sensor,
+    climate,
     humidifier,
     sensor,
 )
@@ -38,6 +39,7 @@ from custom_components.bosch_homecom.binary_sensor import (
     BoschComBaconDehumidifierStatus,
     async_setup_entry as binary_sensor_async_setup_entry,
 )
+from custom_components.bosch_homecom.climate import BoschComBaconRacClimate
 from custom_components.bosch_homecom.coordinator import (
     BoschComModuleCoordinatorBaconRac,
 )
@@ -360,17 +362,21 @@ def test_humidity_capability_identifies_device_before_identity_arrives():
     assert not bacon_is_dehumidifier(coordinator.data)
 
 
+@pytest.mark.parametrize("model", ["6000i", "8000i"])
 @pytest.mark.asyncio
-async def test_platform_entities_share_the_device_and_load_translated_names(hass):
+async def test_platform_entities_share_the_device_and_load_translated_names(
+    hass, model
+):
     """Register the platform entities through HA, including translation loading."""
     hass.config.language = "de"
-    coordinator = make_coordinator()
+    coordinator = make_coordinator(model)
     entry = MockConfigEntry(domain="bosch_homecom")
     entry.add_to_hass(hass)
     entry.runtime_data = [coordinator]
     platforms = []
     try:
         for domain, module in [
+            ("climate", climate),
             ("humidifier", humidifier),
             ("sensor", sensor),
             ("binary_sensor", binary_sensor),
@@ -403,9 +409,199 @@ async def test_platform_entities_share_the_device_and_load_translated_names(hass
         assert all(
             hass.states.get(entity.entity_id) is not None for entity in registered
         )
+        control = next(
+            entity for entity in registered if entity.unique_id.endswith("-control")
+        )
+        assert control.domain == "humidifier"
+        assert (
+            hass.states.get(control.entity_id).attributes["device_class"]
+            == "dehumidifier"
+        )
+        assert not any(
+            entity.domain == "climate"
+            for entity in entity_registry.async_entries_for_config_entry(
+                registry, entry.entry_id
+            )
+        )
     finally:
         for platform in platforms:
             await platform.async_reset()
+
+
+@pytest.mark.parametrize("model", ["6000i", "8000i"])
+@pytest.mark.asyncio
+async def test_climate_setup_removes_only_the_obsolete_device_entry(hass, model):
+    coordinator = make_coordinator(model)
+    entry = MockConfigEntry(domain="bosch_homecom")
+    entry.add_to_hass(hass)
+    entry.runtime_data = [coordinator]
+    registry = entity_registry.async_get(hass)
+    obsolete = registry.async_get_or_create(
+        "climate",
+        "bosch_homecom",
+        f"{coordinator.unique_id}-climate",
+        config_entry=entry,
+    )
+    preserved = [
+        registry.async_get_or_create(
+            "climate", "bosch_homecom", "OTHER-DEVICE-climate", config_entry=entry
+        ),
+        registry.async_get_or_create(
+            "climate",
+            "another_integration",
+            f"{coordinator.unique_id}-climate",
+            config_entry=entry,
+        ),
+        registry.async_get_or_create(
+            "humidifier",
+            "bosch_homecom",
+            f"{coordinator.unique_id}-dehumidifier-control",
+            config_entry=entry,
+        ),
+    ]
+    added = []
+    await climate.async_setup_entry(hass, entry, added.extend)
+    assert added == []
+    assert registry.async_get(obsolete.entity_id) is None
+    assert all(registry.async_get(entity.entity_id) is not None for entity in preserved)
+
+
+@pytest.mark.asyncio
+async def test_climate_cleanup_respects_the_config_entry(hass):
+    coordinator = make_coordinator()
+    entry = MockConfigEntry(domain="bosch_homecom")
+    other_entry = MockConfigEntry(domain="bosch_homecom")
+    entry.add_to_hass(hass)
+    other_entry.add_to_hass(hass)
+    entry.runtime_data = [coordinator]
+    registry = entity_registry.async_get(hass)
+    foreign = registry.async_get_or_create(
+        "climate",
+        "bosch_homecom",
+        f"{coordinator.unique_id}-climate",
+        config_entry=other_entry,
+    )
+    await climate.async_setup_entry(hass, entry, lambda entities: None)
+    assert registry.async_get(foreign.entity_id) is not None
+
+
+@pytest.mark.parametrize("model", ["6000i", "8000i", "climate_6000i"])
+@pytest.mark.asyncio
+async def test_late_identity_keeps_only_the_correct_control_entity(hass, model):
+    """An existing climate entity is retired when a late MQTT identity is Dry."""
+    coordinator = make_coordinator()
+    identified = deepcopy(coordinator.data)
+    if model == "climate_6000i":
+        identified.info["appliance"]["type"] = model
+        identified.reported.update(tempSetpoint=23, opMode="cool")
+        identified.metadata["shadows"]["state"]["tempSetpoint"] = {"min": 16, "max": 30}
+    else:
+        identified.info["appliance"]["type"] = f"dry_{model}_v2"
+    coordinator.data.info = None
+    coordinator.data.metadata = None
+    coordinator.data.reported = {"powerEnabled": True}
+    listeners = set()
+
+    def subscribe(listener, *args, **kwargs):
+        listeners.add(listener)
+        return lambda: listeners.discard(listener)
+
+    coordinator.async_add_listener.side_effect = subscribe
+    entry = MockConfigEntry(domain="bosch_homecom")
+    entry.add_to_hass(hass)
+    entry.runtime_data = [coordinator]
+    registry = entity_registry.async_get(hass)
+    platforms = []
+    try:
+        for domain, module in [("climate", climate), ("humidifier", humidifier)]:
+            platform = MockEntityPlatform(
+                hass, domain=domain, platform_name="bosch_homecom", platform=module
+            )
+            platforms.append(platform)
+            assert await platform.async_setup_entry(entry)
+        await hass.async_block_till_done()
+        old_climate_id = registry.async_get_entity_id(
+            "climate", "bosch_homecom", f"{coordinator.unique_id}-climate"
+        )
+        assert old_climate_id is not None
+        coordinator.data = identified
+        # Repeated pushes must not duplicate native controls or remove ACs.
+        for _ in range(2):
+            for listener in tuple(listeners):
+                listener()
+            await hass.async_block_till_done()
+        registered = entity_registry.async_entries_for_config_entry(
+            registry, entry.entry_id
+        )
+        if model == "climate_6000i":
+            assert [entity.domain for entity in registered] == ["climate"]
+            assert hass.states.get(old_climate_id).attributes["temperature"] == 23
+        else:
+            assert [entity.domain for entity in registered] == ["humidifier"]
+            assert hass.states.get(old_climate_id) is None
+            assert (
+                hass.states.get(registered[0].entity_id).attributes["device_class"]
+                == "dehumidifier"
+            )
+    finally:
+        for platform in platforms:
+            await platform.async_reset()
+
+
+@pytest.mark.asyncio
+async def test_late_identity_removes_a_disabled_climate_entry(hass):
+    coordinator = make_coordinator()
+    identified = deepcopy(coordinator.data)
+    coordinator.data.info = None
+    coordinator.data.metadata = None
+    coordinator.data.reported = {"powerEnabled": True}
+    entry = MockConfigEntry(domain="bosch_homecom")
+    entry.add_to_hass(hass)
+    entry.runtime_data = [coordinator]
+    registry = entity_registry.async_get(hass)
+    disabled = registry.async_get_or_create(
+        "climate",
+        "bosch_homecom",
+        f"{coordinator.unique_id}-climate",
+        config_entry=entry,
+        disabled_by=entity_registry.RegistryEntryDisabler.USER,
+    )
+    platform = MockEntityPlatform(
+        hass, domain="climate", platform_name="bosch_homecom", platform=climate
+    )
+    try:
+        assert await platform.async_setup_entry(entry)
+        assert hass.states.get(disabled.entity_id) is None
+        coordinator.data = identified
+        coordinator.async_add_listener.call_args.args[0]()
+        await hass.async_block_till_done()
+        assert registry.async_get(disabled.entity_id) is None
+    finally:
+        await platform.async_reset()
+
+
+@pytest.mark.parametrize("model", ["6000i", "8000i"])
+@pytest.mark.asyncio
+async def test_identity_arriving_before_queued_climate_is_added(hass, model):
+    coordinator = make_coordinator(model)
+    identified = deepcopy(coordinator.data)
+    coordinator.data.info = None
+    coordinator.data.metadata = None
+    coordinator.data.reported = {"powerEnabled": True}
+    entity = BoschComBaconRacClimate(coordinator)
+    coordinator.data = identified
+    entry = MockConfigEntry(domain="bosch_homecom")
+    entry.add_to_hass(hass)
+    platform = MockEntityPlatform(hass, domain="climate", platform_name="bosch_homecom")
+    platform.config_entry = entry
+    try:
+        await platform.async_add_entities([entity])
+        await hass.async_block_till_done()
+        registry = entity_registry.async_get(hass)
+        assert registry.async_get(entity.entity_id) is None
+        assert hass.states.get(entity.entity_id) is None
+    finally:
+        await platform.async_reset()
 
 
 @pytest.mark.asyncio
