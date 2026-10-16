@@ -12,14 +12,21 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .bacon import bacon_is_dehumidifier, bacon_sensor_attributes
 from .coordinator import (
     BoschComModuleCoordinatorBaconRac,
     BoschComModuleCoordinatorCommodule,
     BoschComModuleCoordinatorK40,
 )
-from .dehumidifier import async_setup_dehumidifier_entities, dehumidifier_status_entities
 
 PARALLEL_UPDATES = 1
+
+DEHUMIDIFIER_STATUS_FIELDS = (
+    ("waterTankFull", "bacon_water_tank_full", BinarySensorDeviceClass.PROBLEM),
+    ("defrostingActive", "bacon_defrosting", BinarySensorDeviceClass.RUNNING),
+    ("condensatePumpRunning", "bacon_condensate_pump", BinarySensorDeviceClass.RUNNING),
+    ("idleState", "bacon_idle", None),
+)
 
 
 async def async_setup_entry(
@@ -30,6 +37,30 @@ async def async_setup_entry(
     """Set up the BoschCom binary sensors."""
     coordinators = config_entry.runtime_data
     entities = []
+    added_dehumidifiers: set[str] = set()
+
+    @callback
+    def _async_add_dehumidifier_sensors() -> None:
+        new_entities = []
+        for coordinator in coordinators:
+            if (
+                coordinator.unique_id in added_dehumidifiers
+                or not bacon_is_dehumidifier(coordinator.data)
+            ):
+                continue
+            new_entities.extend(
+                BoschComBaconDehumidifierStatus(
+                    coordinator=coordinator,
+                    field=field,
+                    translation_key=translation_key,
+                    device_class=device_class,
+                )
+                for field, translation_key, device_class in DEHUMIDIFIER_STATUS_FIELDS
+            )
+            added_dehumidifiers.add(coordinator.unique_id)
+        if new_entities:
+            async_add_entities(new_entities)
+
     for coordinator in coordinators:
         if coordinator.data.device["deviceType"] == "commodule":
             entities.append(BoschComCommoduleNetworkSensor(coordinator=coordinator))
@@ -45,10 +76,12 @@ async def async_setup_entry(
         if coordinator.data.device["deviceType"] == "bacon_rac":
             # Comfort features use switch entities; add connectivity here.
             entities.append(BoschComBaconOnlineSensor(coordinator=coordinator))
+            # Recheck the subtype when push-only info/meta arrives after setup.
+            config_entry.async_on_unload(
+                coordinator.async_add_listener(_async_add_dehumidifier_sensors)
+            )
     async_add_entities(entities)
-    async_setup_dehumidifier_entities(
-        hass, config_entry, async_add_entities, dehumidifier_status_entities
-    )
+    _async_add_dehumidifier_sensors()
 
 
 class BoschComCommoduleNetworkSensor(CoordinatorEntity, BinarySensorEntity):
@@ -188,3 +221,48 @@ class BoschComBaconOnlineSensor(CoordinatorEntity, BinarySensorEntity):
         """Expose the link quality the device reports alongside."""
         quality = (self._info.get("network") or {}).get("signalQuality")
         return {"signal_quality": quality} if quality else {}
+
+
+class BoschComBaconDehumidifierStatus(CoordinatorEntity, BinarySensorEntity):
+    """A tank, defrost, pump or idle flag from the MQTT sensor channel."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        coordinator: BoschComModuleCoordinatorBaconRac,
+        field: str,
+        translation_key: str,
+        device_class: BinarySensorDeviceClass | None = None,
+    ) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+        self._field = field
+        self._attr_unique_id = f"{coordinator.unique_id}-dehumidifier-{field}"
+        self._attr_device_info = coordinator.device_info
+        self._attr_translation_key = translation_key
+        self._attr_device_class = device_class
+
+    @property
+    def _sensor(self) -> dict:
+        data = self.coordinator.data
+        return (getattr(data, "sensor", None) if data else None) or {}
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the reported status, or unknown before it is received."""
+        value = self._sensor.get(self._field)
+        return value if isinstance(value, bool) else None
+
+    @property
+    def available(self) -> bool:
+        """Return whether the coordinator and device are online."""
+        data = self.coordinator.data
+        info = (getattr(data, "info", None) if data else None) or {}
+        return super().available and info.get("online") is not False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Expose when the device measured the status."""
+        return bacon_sensor_attributes(self._sensor)

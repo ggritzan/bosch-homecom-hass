@@ -577,6 +577,9 @@
       },
       "local_data_source": {
         "name": "Gegevensbron"
+      },
+      "bacon_humidity": {
+        "name": "Luchtvochtigheid"
       }
     },
     "binary_sensor": {
@@ -588,6 +591,18 @@
       },
       "bacon_online": {
         "name": "Verbinding"
+      },
+      "bacon_water_tank_full": {
+        "name": "Watertank vol"
+      },
+      "bacon_defrosting": {
+        "name": "Ontdooien"
+      },
+      "bacon_condensate_pump": {
+        "name": "Condensaatpomp"
+      },
+      "bacon_idle": {
+        "name": "Ruststand"
       }
     },
     "number": {
@@ -707,6 +722,11 @@
           "bath": "Veiligheidstemperatuur",
           "ownprogram": "Eigen programma"
         }
+      }
+    },
+    "humidifier": {
+      "bacon_dehumidifier": {
+        "name": "Luchtontvochtiger"
       }
     }
   }

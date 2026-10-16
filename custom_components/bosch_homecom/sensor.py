@@ -31,6 +31,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .bacon import bacon_is_dehumidifier, bacon_sensor_attributes
 from .const import BOSCH_SENSOR_DESCRIPTORS, DOMAIN, WDDW2_NOTIFICATION_CODES
 from .coordinator import (
     BoschComModuleCoordinatorBaconRac,
@@ -41,7 +42,6 @@ from .coordinator import (
     BoschComModuleCoordinatorRrc2,
     BoschComModuleCoordinatorWddw2,
 )
-from .dehumidifier import BoschComDehumidifierHumidity, async_setup_dehumidifier_entities
 from .local_sensor import LOCAL_SENSORS, BoschComLocalSensor, BoschComLocalSourceSensor
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +58,25 @@ async def async_setup_entry(
     """Set up the K40/RAC/WDDW2 sensors."""
     coordinators = config_entry.runtime_data
     entities: list[SensorEntity] = []
+    added_dehumidifiers: set[str] = set()
+
+    @callback
+    def _async_add_dehumidifier_sensors() -> None:
+        new_entities = []
+        for coordinator in coordinators:
+            if (
+                coordinator.unique_id in added_dehumidifiers
+                or not bacon_is_dehumidifier(coordinator.data)
+            ):
+                continue
+            new_entities.append(
+                BoschComBaconHumidity(
+                    coordinator=coordinator, config_entry=config_entry
+                )
+            )
+            added_dehumidifiers.add(coordinator.unique_id)
+        if new_entities:
+            async_add_entities(new_entities)
 
     def _resolve_path(path: list[str], dhw_id: str) -> list[str]:
         """Return a path with {dhw_id} placeholders replaced, if any."""
@@ -115,6 +134,10 @@ async def async_setup_entry(
                         coordinator=coordinator, config_entry=config_entry
                     ),
                 ]
+            )
+            # Recheck the subtype when push-only info/meta arrives after setup.
+            config_entry.async_on_unload(
+                coordinator.async_add_listener(_async_add_dehumidifier_sensors)
             )
         elif device_type == "wddw2":
             entities.append(
@@ -626,12 +649,7 @@ async def async_setup_entry(
     if entities:
         async_add_entities(entities)
 
-    async_setup_dehumidifier_entities(
-        hass,
-        config_entry,
-        async_add_entities,
-        lambda coordinator: [BoschComDehumidifierHumidity(coordinator)],
-    )
+    _async_add_dehumidifier_sensors()
 
 
 class BoschComSensorBase(CoordinatorEntity, SensorEntity):
@@ -3753,6 +3771,49 @@ class BoschComBaconRoomTemperature(BoschComSensorBase):
         return {
             "measured_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
         }
+
+
+class BoschComBaconHumidity(BoschComSensorBase):
+    """Relative humidity measured by a Bosch 6000i/8000i dehumidifier."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.HUMIDITY
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+
+    def __init__(self, coordinator, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize the entity."""
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            unique_id=f"{coordinator.unique_id}-dehumidifier-humidity",
+            icon="mdi:water-percent",
+        )
+        self._attr_translation_key = "bacon_humidity"
+
+    @property
+    def _sensor(self) -> dict:
+        data = self.coordinator.data
+        return (getattr(data, "sensor", None) if data else None) or {}
+
+    @property
+    def native_value(self) -> float | None:
+        """Return measured humidity, or unknown before it is received."""
+        value = self._sensor.get("relHumidity")
+        return value if type(value) in (int, float) else None
+
+    @property
+    def available(self) -> bool:
+        """Return whether the coordinator and device are online."""
+        data = self.coordinator.data
+        info = (getattr(data, "info", None) if data else None) or {}
+        return super().available and info.get("online") is not False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Expose when the device measured the humidity."""
+        return bacon_sensor_attributes(self._sensor)
 
 
 class BoschComBaconSignalQuality(BoschComSensorBase):

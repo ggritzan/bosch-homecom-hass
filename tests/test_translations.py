@@ -21,6 +21,7 @@ FILE_PLATFORM = {
     "binary_sensor.py": "binary_sensor",
     "select.py": "select",
     "climate.py": "climate",
+    "humidifier.py": "humidifier",
     "fan.py": "fan",
     "number.py": "number",
     "switch.py": "switch",

@@ -82,15 +82,23 @@ status are binary sensors; temperature, connectivity and supported feature
 switches use the existing MQTT entities. Sensors may initially be unknown until
 the appliance pushes a reading.
 
-The implementation lives in `dehumidifier.py`; Home Assistant loads the control
-through its standard `humidifier.py` platform. Bosch's protocol identifiers such
-as `dry_6000i_v2` are used as supplied. Legacy `-dry-` unique IDs are migrated to
-`-dehumidifier-` without changing entity IDs or custom names.
+The control lives in `humidifier.py`, humidity measurements in `sensor.py` and
+status flags in `binary_sensor.py`, alongside the existing Bacon entities.
+Shared protocol helpers live in `bacon.py`. The platforms also add entities when
+appliance identification arrives after setup. Bosch protocol identifiers such as
+`dry_6000i_v2` are used as supplied. Legacy `-dry-` unique IDs are migrated to
+`-dehumidifier-` during integration setup without changing entity IDs or custom
+names. Entity names follow the configured Home Assistant language.
+
+Home Assistant uses the `humidifier` domain for both humidifiers and
+dehumidifiers; these devices have `device_class: dehumidifier`. They do not get
+an additional climate entity. Obsolete climate entities from earlier versions
+are removed automatically once the device is identified as a dehumidifier.
 
 The 6000i mapping is based on an anonymised device capture. Automated coverage
 also exercises an 8000i identity using the shared capability schema; a live
 8000i capture and physical verification of commands are still outstanding.
-Run these tests with `pytest tests_dehumidifier_support`.
+Run these tests with `pytest tests/test_dehumidifier.py`.
 
 ### Local network access (K 40 RF)
 
