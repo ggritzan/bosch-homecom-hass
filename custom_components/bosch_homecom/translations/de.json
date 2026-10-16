@@ -579,6 +579,9 @@
       },
       "local_data_source": {
         "name": "Datenquelle"
+      },
+      "bacon_humidity": {
+        "name": "Luftfeuchtigkeit"
       }
     },
     "binary_sensor": {
@@ -590,6 +593,18 @@
       },
       "bacon_online": {
         "name": "Verbindung"
+      },
+      "bacon_water_tank_full": {
+        "name": "Wassertank voll"
+      },
+      "bacon_defrosting": {
+        "name": "Abtauen"
+      },
+      "bacon_condensate_pump": {
+        "name": "Kondensatpumpe"
+      },
+      "bacon_idle": {
+        "name": "Ruhezustand"
       }
     },
     "number": {
@@ -709,6 +724,11 @@
           "bath": "Sicherheitstemperatur",
           "ownprogram": "Eigenes Programm"
         }
+      }
+    },
+    "humidifier": {
+      "bacon_dehumidifier": {
+        "name": "Luftentfeuchter"
       }
     }
   }

@@ -20,6 +20,7 @@ from homeassistant.core import (
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from homecom_alt import (
@@ -362,6 +363,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     entry.runtime_data = coordinators
+    _async_migrate_dehumidifier_ids(hass, entry)
     # Forward the setup to the sensor platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -385,6 +387,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.update_interval = _get_update_interval(entry)
 
     return True
+
+
+@callback
+def _async_migrate_dehumidifier_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Keep entity IDs and custom names when upgrading the earlier Dry patch."""
+    registry = er.async_get(hass)
+    prefixes = {
+        f"{coordinator.unique_id}-dry-": f"{coordinator.unique_id}-dehumidifier-"
+        for coordinator in entry.runtime_data
+        if coordinator.data.device.get("deviceType") == "bacon_rac"
+    }
+    for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registered.platform != DOMAIN:
+            continue
+        for old_prefix, new_prefix in prefixes.items():
+            if not registered.unique_id.startswith(old_prefix):
+                continue
+            new_unique_id = new_prefix + registered.unique_id[len(old_prefix) :]
+            if not registry.async_get_entity_id(registered.domain, DOMAIN, new_unique_id):
+                registry.async_update_entity(
+                    registered.entity_id, new_unique_id=new_unique_id
+                )
+            break
 
 
 @callback
