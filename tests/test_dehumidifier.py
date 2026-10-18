@@ -2,7 +2,9 @@
 
 Uses real Home Assistant 2026.9.1 entity classes and homecom_alt 1.8.2.
 Only the network transport is mocked; no Bosch account is used.
-The fixture is a 6000i capture; 8000i cases simulate the shared capability schema.
+Shared behavior tests use a normalized 6000i fixture for both models. Separate
+8000i regression tests use its anonymized diagnostic capture, including offline
+availability and the actual reported humidity values.
 """
 
 from __future__ import annotations
@@ -60,9 +62,14 @@ PLATFORM_CASES = [
 ]
 
 
-def make_coordinator(model="6000i", device_id="TEST-DEHUMIDIFIER-001"):
+def make_coordinator(
+    model="6000i",
+    device_id="TEST-DEHUMIDIFIER-001",
+    *,
+    fixture_name="dehumidifier.json",
+):
     payload = json.loads(
-        (Path(__file__).parent / "fixtures" / "dehumidifier.json").read_text()
+        (Path(__file__).parent / "fixtures" / fixture_name).read_text()
     )
     payload["info"]["appliance"]["type"] = f"dry_{model}_v2"
     coordinator = MagicMock(spec=BoschComModuleCoordinatorBaconRac)
@@ -85,6 +92,30 @@ def dehumidifier_status_entities(coordinator):
         BoschComBaconDehumidifierStatus(coordinator, field, key, device_class)
         for field, key, device_class in DEHUMIDIFIER_STATUS_FIELDS
     ]
+
+
+def test_captured_8000i_identity_capabilities_and_offline_state():
+    coordinator = make_coordinator("8000i", fixture_name="dehumidifier_8000i.json")
+    control = BoschComBaconDehumidifier(coordinator)
+    humidity = BoschComBaconHumidity(coordinator, MagicMock())
+    assert bacon_appliance_type(coordinator.data) is BaconApplianceType.DEHUMIDIFIER
+    assert control.device_class == HumidifierDeviceClass.DEHUMIDIFIER
+    assert control.mode == "auto"
+    assert control.available_modes == ["auto", "night", "laundry"]
+    assert (
+        control.min_humidity,
+        control.max_humidity,
+        control.target_humidity_step,
+    ) == (40, 70, 5)
+    assert control.target_humidity == 55
+    assert control.current_humidity == humidity.native_value == 58
+    # An enabled shadow is cached state, not proof that the appliance is online.
+    assert control.is_on is True
+    assert control.available is False
+    assert humidity.available is False
+    for status in dehumidifier_status_entities(coordinator):
+        assert status.is_on is False
+        assert status.available is False
 
 
 @pytest.mark.parametrize("model", ["6000i", "8000i"])

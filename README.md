@@ -105,9 +105,11 @@ This migration also handles disabled entries and stops listening once the kind
 is known. If late model information corrects an already selected kind, the
 integration saves the correction and reloads once to recreate the right platforms.
 
-The 6000i mapping is based on an anonymised device capture. Automated coverage
-also exercises an 8000i identity using the shared capability schema; a live
-8000i capture and physical verification of commands are still outstanding.
+The mappings are backed by anonymised captures from a 6000i and an 8000i
+(`dry_8000i_v2`). The 8000i capture confirms the shared modes, humidity bounds
+and status fields. Its cached power state is on while its info reports offline;
+regression coverage verifies that it remains unavailable until an online update.
+Physical verification of commands is still outstanding.
 Run these tests with
 `pytest tests/test_dehumidifier.py tests/test_bacon_discovery.py`.
 

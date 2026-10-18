@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from homeassistant.components.humidifier import async_setup as async_setup_humidifier
 from homeassistant.const import CONF_DEVICES, CONF_TOKEN
 from homeassistant.helpers import entity_registry as er
 from homecom_alt import BHCDeviceBaconRac
@@ -61,6 +62,7 @@ def _data(**overrides):
         ("dry_6000i", BaconApplianceType.DEHUMIDIFIER),
         ("dry_6000i_v2", BaconApplianceType.DEHUMIDIFIER),
         ("dry_8000i_v1", BaconApplianceType.DEHUMIDIFIER),
+        ("dry_8000i_v2", BaconApplianceType.DEHUMIDIFIER),
         ("climate_6000i", BaconApplianceType.AIR_CONDITIONER),
         ("climate_7000i_v2", BaconApplianceType.AIR_CONDITIONER),
         ("air_6000i", BaconApplianceType.UNKNOWN),
@@ -452,3 +454,86 @@ async def test_real_coordinators_discover_mixed_appliances_and_migrate_old_entri
             await platform.async_reset()
         for coordinator in coordinators:
             await coordinator.async_shutdown()
+
+
+async def test_captured_8000i_registers_as_dehumidifier_and_recovers_from_offline(hass):
+    """Use the captured 8000i values in actual HA platforms and a service call."""
+    await async_setup_humidifier(hass, {})
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "dehumidifier_8000i.json").read_text()
+    )
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    serial = payload["device"]["deviceId"]
+    coordinator = _coordinator(hass, entry, serial, info=deepcopy(payload["info"]))
+    coordinator.bhc.metadata = deepcopy(payload["metadata"])
+    coordinator.bhc.sensor = deepcopy(payload["sensor"])
+    coordinator.client.async_set_desired = AsyncMock()
+    coordinator.async_request_refresh = AsyncMock()
+    coordinator._handle_push(
+        {
+            "reported": deepcopy(payload["reported"]),
+            "desired": deepcopy(payload["desired"]),
+        }
+    )
+    entry.runtime_data = [coordinator]
+    assert coordinator.appliance_type is BaconApplianceType.DEHUMIDIFIER
+    assert entry.data[CONF_BACON_APPLIANCE_TYPES][serial] == "dehumidifier"
+    platforms = []
+    registry = er.async_get(hass)
+    try:
+        for domain, module in (
+            ("climate", climate),
+            ("humidifier", humidifier),
+            ("sensor", sensor),
+            ("binary_sensor", binary_sensor),
+        ):
+            platform = MockEntityPlatform(
+                hass, domain=domain, platform_name=DOMAIN, platform=module
+            )
+            platforms.append(platform)
+            assert await platform.async_setup_entry(entry)
+        await hass.async_block_till_done()
+        control_id = registry.async_get_entity_id(
+            "humidifier", DOMAIN, f"{serial}-dehumidifier-control"
+        )
+        assert control_id is not None
+        assert hass.states.get(control_id).state == "unavailable"
+        assert not hass.states.async_entity_ids("climate")
+        registered = er.async_entries_for_config_entry(registry, entry.entry_id)
+        entities = [
+            entity for entity in registered if "-dehumidifier-" in entity.unique_id
+        ]
+        assert len(entities) == 6
+        assert len({entity.device_id for entity in entities}) == 1
+
+        # Simulate a subsequent online notification; no live device is contacted.
+        coordinator.bhc.info["online"] = True
+        coordinator._handle_push({"reported": {}})
+        await hass.async_block_till_done()
+        state = hass.states.get(control_id)
+        assert state.state == "on"
+        assert state.attributes["device_class"] == "dehumidifier"
+        assert state.attributes["humidity"] == 55
+        assert state.attributes["current_humidity"] == 58
+        humidity_id = registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{serial}-dehumidifier-humidity"
+        )
+        assert hass.states.get(humidity_id).state == "58"
+        await hass.services.async_call(
+            "humidifier",
+            "set_humidity",
+            {"entity_id": control_id, "humidity": 60},
+            blocking=True,
+        )
+        coordinator.client.async_set_desired.assert_awaited_once_with(
+            serial, {"humiditySetpoint": 60}
+        )
+        assert hass.states.get(control_id).attributes["humidity"] == 55
+        coordinator._handle_push({"reported": {"humiditySetpoint": 60}})
+        await hass.async_block_till_done()
+        assert hass.states.get(control_id).attributes["humidity"] == 60
+    finally:
+        for platform in platforms:
+            await platform.async_reset()
+        await coordinator.async_shutdown()

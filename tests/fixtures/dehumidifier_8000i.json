@@ -1,0 +1,136 @@
+{
+  "device": {
+    "deviceId": "TEST-DEHUMIDIFIER-8000I",
+    "deviceType": "bacon_rac"
+  },
+  "reported": {
+    "powerEnabled": true,
+    "opMode": "auto",
+    "humiditySetpoint": 55,
+    "childLockEnabled": true,
+    "onTimestamp": 0,
+    "offTimestamp": 0,
+    "laundryModeTimestamp": 0,
+    "displayEnabled": true,
+    "dataLakeBasePublishInterval": 1800
+  },
+  "desired": {
+    "powerEnabled": true,
+    "opMode": "auto",
+    "humiditySetpoint": 55,
+    "childLockEnabled": true,
+    "onTimestamp": 0,
+    "offTimestamp": 0,
+    "laundryModeTimestamp": 0,
+    "displayEnabled": true
+  },
+  "sensor": {
+    "timestamp": 1792311761,
+    "roomTemperature": 22,
+    "relHumidity": 58,
+    "waterTankFull": false,
+    "defrostingActive": false,
+    "condensatePumpRunning": false,
+    "idleState": false
+  },
+  "metadata": {
+    "shadows": {
+      "state": {
+        "powerEnabled": {
+          "type": "boolean",
+          "ro": false
+        },
+        "opMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "night",
+            "laundry"
+          ],
+          "ro": false
+        },
+        "humiditySetpoint": {
+          "type": "int",
+          "unit": "%",
+          "min": 40,
+          "max": 70,
+          "step": 5,
+          "ro": false
+        },
+        "childLockEnabled": {
+          "type": "boolean",
+          "ro": false
+        },
+        "onTimestamp": {
+          "type": "int",
+          "unit": "sec",
+          "min": 0,
+          "max": 4294967295,
+          "ro": true
+        },
+        "offTimestamp": {
+          "type": "int",
+          "unit": "sec",
+          "min": 0,
+          "max": 4294967295,
+          "step": 60,
+          "ro": false
+        },
+        "laundryModeTimestamp": {
+          "type": "int",
+          "unit": "sec",
+          "min": 0,
+          "max": 4294967295,
+          "step": 3600,
+          "ro": false
+        },
+        "displayEnabled": {
+          "type": "boolean",
+          "ro": false
+        }
+      }
+    },
+    "topics": {
+      "sensor": {
+        "timestamp": {
+          "type": "int"
+        },
+        "roomTemperature": {
+          "type": "float",
+          "unit": "degC",
+          "min": -20,
+          "max": 40
+        },
+        "relHumidity": {
+          "type": "int",
+          "unit": "%",
+          "min": 10,
+          "max": 100
+        },
+        "waterTankFull": {
+          "type": "boolean"
+        },
+        "defrostingActive": {
+          "type": "boolean"
+        },
+        "condensatePumpRunning": {
+          "type": "boolean"
+        },
+        "idleState": {
+          "type": "boolean"
+        }
+      }
+    },
+    "features": {
+      "history": [
+        "DRY_BASE"
+      ]
+    }
+  },
+  "info": {
+    "online": false,
+    "appliance": {
+      "type": "dry_8000i_v2"
+    }
+  }
+}
